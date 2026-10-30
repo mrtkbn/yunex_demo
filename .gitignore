@@ -21,3 +21,9 @@ coverage/
 
 # Logs
 *.log
+
+# Test coverage and local pipeline data
+.coverage
+coverage.xml
+htmlcov/
+data/
