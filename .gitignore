@@ -1,0 +1,23 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies and build output
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+coverage/
+
+# Logs
+*.log

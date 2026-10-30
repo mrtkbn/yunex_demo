@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff lint and format check
+        entry: sh -c 'uv run ruff check . && uv run ruff format --check .'
+        language: system
+        pass_filenames: false
+        always_run: true
