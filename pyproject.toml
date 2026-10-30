@@ -5,7 +5,16 @@ description = "Short description of the project."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "minio>=7.2.20",
+    "numpy>=2.5.4",
+    "pandas>=3.1.0",
+    "plotly>=7.1.0",
+    "pyarrow>=26.0.0",
+    "python-dotenv>=1.2.4",
+    "requests>=2.34.2",
+    "streamlit>=1.66.1",
+]
 
 [dependency-groups]
 dev = [
@@ -24,15 +33,20 @@ build-backend = "hatchling.build"
 packages = ["src/yunex_demo"]
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+"src/yunex_demo/demo_1/*" = ["E501"]  # long UI help strings
+
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
+# demo_1 is untyped and uses flat script imports; type-check it once it is annotated
+exclude = ["demo_1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

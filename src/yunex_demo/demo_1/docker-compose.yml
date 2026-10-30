@@ -1,0 +1,15 @@
+services:
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console (login from .env)
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:?set MINIO_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:?set MINIO_PASSWORD in .env}
+    volumes:
+      - minio_data:/data
+
+volumes:
+  minio_data:
