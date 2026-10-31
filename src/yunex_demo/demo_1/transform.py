@@ -224,13 +224,9 @@ def flatten(star: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------- MAIN
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--local", action="store_true")
-    args = ap.parse_args()
-    store = Store(local=args.local or default_local())
-
-    stamp = f"{C.START}_{C.END}"
+def run_transform(store: Store, start: str = C.START, end: str = C.END) -> None:
+    """RAW -> SILVER -> GOLD for the window [start, end] (callable from Airflow)."""
+    stamp = f"{start}_{end}"
     ecb = store.get_csv("raw", f"ecb/rates_{stamp}.csv")
     cbar = store.get_csv("raw", f"cbar/rates_{stamp}.csv")
 
@@ -242,6 +238,14 @@ def main():
     for name, df in star.items():
         store.put_parquet("gold", f"{name}.parquet", df)
         print(f"gold/{name}.parquet: {len(df)} rows")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--local", action="store_true")
+    args = ap.parse_args()
+    store = Store(local=args.local or default_local())
+    run_transform(store, C.START, C.END)
 
 
 if __name__ == "__main__":

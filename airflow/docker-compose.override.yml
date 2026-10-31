@@ -1,0 +1,24 @@
+# Joins the Airflow containers to the `fx_net` network (where MinIO runs, see
+# src/yunex_demo/demo_1/docker-compose.yml) and mounts the pipeline code into them.
+# Create the network once: `docker network create fx_net` (or `make network`).
+x-fx-common: &fx-common
+  networks:
+    - airflow
+    - fx_net
+  volumes:
+    - ../src/yunex_demo/demo_1:/usr/local/airflow/include/demo_1:ro
+
+services:
+  scheduler:
+    <<: *fx-common
+  dag-processor:
+    <<: *fx-common
+  api-server:
+    <<: *fx-common
+  triggerer:
+    <<: *fx-common
+
+networks:
+  fx_net:
+    external: true
+    name: fx_net
