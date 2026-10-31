@@ -16,13 +16,33 @@ from sample_data import make_sample
 from storage import Store, default_local
 
 
-def fetch_csv(provider: str, base: str, quotes: list[str]) -> bytes:
+def fetch_csv(provider: str, base: str, quotes: list[str], start: str = C.START, end: str = C.END) -> bytes:
     """One provider-pinned CSV request. Columns: date, base, quote, rate."""
     url = f"{C.API}/providers/{provider.lower()}/rates.csv"
-    params = {"base": base, "quotes": ",".join(quotes), "from": C.START, "to": C.END}
+    params = {"base": base, "quotes": ",".join(quotes), "from": start, "to": end}
     r = requests.get(url, params=params, timeout=60)
     r.raise_for_status()
     return r.content
+
+
+def run_ingest(store: Store, start: str = C.START, end: str = C.END, offline: bool = False) -> None:
+    """Land the raw ECB and CBAR CSVs for [start, end] in the RAW bucket (callable from Airflow)."""
+    stamp = f"{start}_{end}"
+
+    if offline:
+        ecb_df, cbar_df = make_sample(start, end)
+        ecb_raw = ecb_df.to_csv(index=False).encode()
+        cbar_raw = cbar_df.to_csv(index=False).encode()
+        print("Using synthetic sample data")
+    else:
+        ecb_raw = fetch_csv("ecb", C.ECB_BASE, C.ECB_QUOTES, start, end)
+        cbar_raw = fetch_csv("cbar", C.CBAR_BASE, C.CBAR_QUOTES, start, end)
+
+    for name, raw in (("ecb", ecb_raw), ("cbar", cbar_raw)):
+        key = f"{name}/rates_{stamp}.csv"
+        store.put_bytes("raw", key, raw)
+        rows = len(pd.read_csv(io.BytesIO(raw)))
+        print(f"raw/{key}: {rows} rows")
 
 
 def main():
@@ -32,22 +52,7 @@ def main():
     args = ap.parse_args()
 
     store = Store(local=args.local or args.offline or default_local())
-    stamp = f"{C.START}_{C.END}"
-
-    if args.offline:
-        ecb_df, cbar_df = make_sample(C.START, C.END)
-        ecb_raw = ecb_df.to_csv(index=False).encode()
-        cbar_raw = cbar_df.to_csv(index=False).encode()
-        print("Using synthetic sample data")
-    else:
-        ecb_raw = fetch_csv("ecb", C.ECB_BASE, C.ECB_QUOTES)
-        cbar_raw = fetch_csv("cbar", C.CBAR_BASE, C.CBAR_QUOTES)
-
-    for name, raw in (("ecb", ecb_raw), ("cbar", cbar_raw)):
-        key = f"{name}/rates_{stamp}.csv"
-        store.put_bytes("raw", key, raw)
-        rows = len(pd.read_csv(io.BytesIO(raw)))
-        print(f"raw/{key}: {rows} rows")
+    run_ingest(store, C.START, C.END, args.offline)
 
 
 if __name__ == "__main__":

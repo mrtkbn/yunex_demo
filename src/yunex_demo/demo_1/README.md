@@ -68,7 +68,7 @@ flowchart LR
 | silver | MinIO bucket `silver/` | One clean table: duplicates and bad values removed, both sources unified |
 | gold | MinIO bucket `gold/` | The 7 star-schema tables, as parquet |
 
-The risk for a chosen payment date is calculated by the app on the fly from the gold tables (`src/horizon.py`).
+The risk for a chosen payment date is calculated by the app on the fly from the gold tables (`horizon.py`).
 It is not stored in the star schema.
 
 ## 4. Data sources
@@ -279,30 +279,204 @@ depend on the payment date. The app shows it as "Recent behaviour".
 
 ## 6. Run it
 
+Run all commands from the repository root with `make -C src/yunex_demo/demo_1 <target>` (or `cd` into
+`src/yunex_demo/demo_1` and run `make <target>`). Dependencies are managed by uv (`uv sync`), and `make help`
+lists every target. Before the first run, copy `.env.example` to `.env` and set `MINIO_USER` and `MINIO_PASSWORD`
+(`make env` does the copy). Airflow has its own file: copy `airflow/.env.example` to `airflow/.env` and use the
+same credentials.
+
+There are four ways to run the pipeline. Pick one:
+
+| Mode | Command | Needs Docker | Needs internet | Data comes from | Stored in |
+|---|---|---|---|---|---|
+| Docker only (6.1) | `make run` | MinIO | Yes | Live API | MinIO |
+| Docker and Airflow (6.2) | `make airflow-up`, then `make airflow-app` | MinIO and Airflow | Yes | Live API | MinIO |
+| Local files, live data (6.3) | `make run-local` | No | Yes | Live API | Local folder |
+| Offline, synthetic data (6.3) | `make offline` | No | No | Invented sample | Local folder |
+
+In every mode the Streamlit app only reads the finished `gold` tables, so it looks the same.
+
+### 6.1 Docker only: you run the steps yourself
+
 ```bash
 make run          # MinIO (Docker) -> ingest -> transform -> Streamlit
 ```
 
-Or step by step:
+Only MinIO runs in Docker. The Python steps and Streamlit run directly on your machine, and reach MinIO through
+the port it publishes on `localhost:9000`.
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+```mermaid
+flowchart LR
+    API["Frankfurter API<br/>(ECB + CBAR rates)"]
 
-docker compose up -d                    # MinIO: API :9000, console :9001 (login from .env)
-python src/ingest.py                    # live API -> MinIO raw/
-python src/transform.py                 # raw -> silver -> gold
-streamlit run src/app.py                # http://localhost:8501
+    subgraph HOST["Your machine"]
+        ING["make ingest<br/>ingest.py"]
+        TRF["make transform<br/>transform.py"]
+        APP["make app<br/>Streamlit :8501"]
+    end
+
+    subgraph DOCKER["Docker"]
+        MINIO[("MinIO<br/>raw / silver / gold<br/>API :9000, console :9001")]
+    end
+
+    API --> ING
+    ING -- "localhost:9000" --> MINIO
+    MINIO -- "raw" --> TRF
+    TRF -- "silver + gold" --> MINIO
+    MINIO -- "gold" --> APP
 ```
 
-No Docker or no internet?
+You decide when to run it: `make ingest`, `make transform` and `make app` can be run one at a time, or all
+together with `make run`.
+
+### 6.2 Docker and Airflow: a scheduler runs the steps
 
 ```bash
-make offline                            # synthetic data, files in ./data, then the app
+make airflow-up       # MinIO + Airflow (Astro); UI at http://localhost:8080 (admin / admin)
+make airflow-run      # run the fx_pipeline DAG once and wait for it
+make app              # Streamlit, reads the gold tables the DAG wrote
+make airflow-app      # the last two in one go: run the DAG, then start Streamlit
 ```
 
-`make help` lists all commands, and `make test` (or `pytest -q`) runs the tests. The synthetic data in
-`src/sample_data.py` is invented: use it only as a backup, and do not present it as real rates.
+Airflow takes over the ingest and transform steps. The DAG `fx_pipeline` has three tasks that depend on each
+other: `ingest`, then `transform`, then `streamlit` (which checks that the gold tables are readable and pings
+the app; it only logs a message if the app is not running). The schedule is switched off, so the DAG runs when
+you trigger it in the UI or with `make airflow-run`. To run it on a timetable, uncomment the `schedule` line in
+`airflow/dags/fx_pipeline.py`.
+
+```mermaid
+flowchart LR
+    API["Frankfurter API<br/>(ECB + CBAR rates)"]
+
+    subgraph DOCKER["Docker"]
+        subgraph AF["Airflow (Astro)  -  airflow/"]
+            direction TB
+            T1["task: ingest"] --> T2["task: transform"] --> T3["task: streamlit"]
+        end
+
+        subgraph NET["shared network: fx_net"]
+            MINIO[("MinIO<br/>raw / silver / gold")]
+        end
+    end
+
+    subgraph HOST["Your machine"]
+        APP["Streamlit :8501"]
+        USER(("You"))
+    end
+
+    API --> T1
+    T1 -- "minio:9000" --> MINIO
+    T2 -- "minio:9000" --> MINIO
+    T3 -- "minio:9000" --> MINIO
+    MINIO -- "localhost:9000 (gold)" --> APP
+    USER -- "trigger / watch<br/>localhost:8080" --> AF
+    USER -- "view<br/>localhost:8501" --> APP
+```
+
+The Streamlit app is the same in both modes. It only reads the `gold` bucket, so it works the same whether you
+filled MinIO yourself or Airflow did.
+
+| | Docker only (6.1) | Docker and Airflow (6.2) |
+|---|---|---|
+| Who runs ingest and transform | You, with `make` | Airflow tasks |
+| Where that code runs | On your machine | Inside the Airflow containers |
+| How it reaches MinIO | `localhost:9000` | `minio:9000` over `fx_net` |
+| Retries, run history, logs | None | Yes, in the Airflow UI |
+| Good for | Quick local work | Repeating the run, scheduling it later |
+
+### 6.3 Without Docker: `--local` and `--offline`
+
+Both modes skip MinIO and write plain files instead, under `src/yunex_demo/data/` in the folders `raw/`,
+`silver/` and `gold/`. The setting `FX_LOCAL=1` (the Makefile sets it for you) tells ingest, transform and the
+app to use that folder.
+
+**Local files, live data** (`make run-local`, or the scripts with `--local`): real rates from the API, no Docker.
+
+```mermaid
+flowchart LR
+    API["Frankfurter API<br/>(ECB + CBAR rates)"]
+
+    subgraph HOST["Your machine only (no Docker)"]
+        ING["ingest.py --local"]
+        TRF["transform.py --local"]
+        APP["Streamlit :8501<br/>FX_LOCAL=1"]
+        FILES[("src/yunex_demo/data/<br/>raw / silver / gold")]
+    end
+
+    API --> ING
+    ING -- "raw CSV" --> FILES
+    FILES -- "raw" --> TRF
+    TRF -- "silver + gold parquet" --> FILES
+    FILES -- "gold" --> APP
+```
+
+**Offline, synthetic data** (`make offline`, or `ingest.py --offline`): no Docker and no internet. The raw files are
+generated by `sample_data.py`, then the same transform and app run on them. The numbers are invented: use this
+as a backup only, and do not present it as real rates.
+
+```mermaid
+flowchart LR
+    subgraph HOST["Your machine only (no Docker, no internet)"]
+        GEN["sample_data.py<br/>invented rates"]
+        ING["ingest.py --offline"]
+        TRF["transform.py --local"]
+        APP["Streamlit :8501<br/>FX_LOCAL=1"]
+        FILES[("src/yunex_demo/data/<br/>raw / silver / gold")]
+    end
+
+    GEN --> ING
+    ING -- "raw CSV" --> FILES
+    FILES -- "raw" --> TRF
+    TRF -- "silver + gold parquet" --> FILES
+    FILES -- "gold" --> APP
+```
+
+The local folder is ignored by git. `make clean` deletes it.
+
+### 6.4 Why MinIO and Airflow share a network (`fx_net`)
+
+Docker gives every compose project its own private network. MinIO (from `docker-compose.yml` in this folder)
+and Airflow (started by Astro from `airflow/`) are two separate projects, so by default they sit on different
+networks and cannot see each other.
+
+```mermaid
+flowchart LR
+    subgraph before["Without fx_net"]
+        direction LR
+        A1["Airflow containers<br/>(Astro network)"] -. "minio:9000 not found<br/>localhost:9000 = itself" .-> M1["MinIO<br/>(its own network)"]
+    end
+
+    subgraph after["With fx_net"]
+        direction LR
+        A2["Airflow containers"] -- "minio:9000" --> M2["MinIO"]
+    end
+```
+
+- **`localhost` does not help.** Inside a container, `localhost` means that container itself, not your machine
+  and not the MinIO container. An Airflow task asking for `localhost:9000` would look for MinIO inside the
+  Airflow container and fail.
+- **A shared network fixes this.** The `fx_net` network is attached to MinIO and to the four Airflow services
+  (scheduler, dag-processor, api-server, triggerer). On a shared network Docker resolves a service name to its
+  container, so Airflow reaches MinIO as `minio:9000`. That is the `MINIO_ENDPOINT` set in `airflow/.env`.
+- **Your machine is not affected.** Streamlit and your browser run outside Docker and still use
+  `localhost:9000` and `localhost:9001`, through the ports MinIO publishes.
+- **Why a separate, named network.** The two projects are started independently, so neither can create a network
+  for the other. `fx_net` is created once (`make network`, run automatically by `make up`), and both compose
+  files declare it as `external`. Airflow's services also keep Astro's own network, so they still reach their
+  database.
+
+### 6.5 Start over
+
+```bash
+make rebuild      # DELETE everything (containers, MinIO data, Airflow history, fx_net), then
+                  # rebuild: MinIO + Airflow, run the DAG once, start Streamlit
+make destroy      # only the deleting part
+make down         # stop MinIO and keep its data
+make airflow-down # stop Airflow and keep MinIO running
+make clean        # delete the local data folder (MinIO is not touched)
+```
+
+`make test` runs the unit tests.
 
 ## 7. Querying the star in pandas
 

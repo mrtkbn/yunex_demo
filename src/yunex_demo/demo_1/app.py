@@ -38,7 +38,7 @@ def level_style(v):
 st.set_page_config(page_title="FX Risk & Anomaly Monitor", layout="wide")
 
 
-@st.cache_data(show_spinner="Loading gold tables...")
+@st.cache_data(ttl=300, show_spinner="Loading gold tables...")  # re-read gold after each scheduled run
 def load():
     store = Store(local=default_local())
     star = {t: store.get_parquet("gold", f"{t}.parquet") for t in TABLES}
