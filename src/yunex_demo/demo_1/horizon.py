@@ -81,6 +81,53 @@ def horizon_risk(d: pd.DataFrame, calendar_days: int, start=None, end=None) -> d
     }
 
 
+def one_day_moves(d: pd.DataFrame, start=None, end=None) -> pd.DataFrame:
+    """The daily moves behind the 1-day downside, as columns `date` and `move` (a fall is negative).
+
+    Same sample as horizon_risk: every move inside the date range, or the last VAR_WINDOW moves.
+    """
+    if start is not None or end is not None:
+        s = in_range(d, start, end)
+        return pd.DataFrame({"date": s["date"], "move": s["rate"].pct_change(fill_method=None)}).dropna()
+    return d[["date", "daily_return"]].rename(columns={"daily_return": "move"}).dropna().tail(C.VAR_WINDOW)
+
+
+def past_periods(d: pd.DataFrame, calendar_days: int, start=None, end=None) -> pd.DataFrame:
+    """Every past stretch as long as the payment term, as columns `start`, `end` and `move` (a fall is negative).
+
+    Same sample as the historical estimate in horizon_risk.
+    """
+    h = business_days(calendar_days)
+    s = in_range(d, start, end) if (start is not None or end is not None) else d
+    return pd.DataFrame(
+        {"start": s["date"].shift(h), "end": s["date"], "move": s["rate"].pct_change(h, fill_method=None)}
+    ).dropna()
+
+
+def bad_episodes(periods: pd.DataFrame, loss_pct: float, calendar_days: int) -> pd.DataFrame:
+    """The stretches worse than the cut, grouped into separate episodes.
+
+    Stretches that start less than one payment term apart overlap and are mostly the same fall, so they
+    count as one episode. Columns: `start`, `end`, `stretches`, `worst`.
+    """
+    worse = periods[periods["move"] < -loss_pct].sort_values("start")
+    new_episode = worse["start"].diff().dt.days.fillna(float("inf")) > calendar_days
+    return (
+        worse.assign(episode=new_episode.cumsum())
+        .groupby("episode")
+        .agg(start=("start", "min"), end=("end", "max"), stretches=("move", "size"), worst=("move", "min"))
+        .reset_index(drop=True)
+    )
+
+
+def cut_rank(n: int, q: float = 0.05) -> float:
+    """Where the q-quantile sits when n values are sorted from worst (1) to best (n).
+
+    pandas interpolates between neighbours, so 5.45 means: between the 5th and 6th worst.
+    """
+    return q * (n - 1) + 1
+
+
 def downside_path(d: pd.DataFrame, business_days_ahead: int, var1=None) -> pd.DataFrame:
     """Rate path for the 1-in-20 downside, one point per business day from the last date.
 
