@@ -14,7 +14,16 @@ import config as C
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from horizon import downside_path, horizon_risk, in_range, range_outcome
+from horizon import (
+    bad_episodes,
+    cut_rank,
+    downside_path,
+    horizon_risk,
+    in_range,
+    one_day_moves,
+    past_periods,
+    range_outcome,
+)
 from storage import Store, default_local
 from transform import flatten
 
@@ -33,6 +42,21 @@ LOOKBACK = {"3 months": 90, "6 months": 180, "12 months": 365, "All": None}
 
 def level_style(v):
     return f"color: {RISK_COLOR.get(v, 'inherit')}; font-weight: 600"
+
+
+def pct(x, digits=2):
+    return "n/a" if pd.isna(x) else f"{x:.{digits}%}"
+
+
+def ordinal(n):
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def cut_text(n):
+    """Where the 'worst 5%' cut falls among n values sorted from worst to best."""
+    pos = cut_rank(n)
+    k = int(pos)
+    return f"the {ordinal(k)} worst" if abs(pos - k) < 1e-9 else f"between the {ordinal(k)} and {ordinal(k + 1)} worst"
 
 
 st.set_page_config(page_title="FX Risk & Anomaly Monitor", layout="wide")
@@ -320,6 +344,145 @@ st.caption(
     "The longer you wait, the larger the possible fall. If you cannot set the payment date, read the row "
     "that matches the longest wait you could face."
 )
+st.caption(
+    "**Downside (scaling)**: take the bad day that only 1 day in 20 is worse than, and assume days like it keep coming. "
+    "Good and bad days partly cancel out, so the loss grows with the square root of the number of days, not day by day. "
+    "A quick estimate from recent daily swings.  \n"
+    "**Downside (past periods)**: look back at every time in the history when someone waited the same number of days, and "
+    "see how much the rate really fell. The fall that only 1 period in 20 was worse than. It uses what actually happened.  \n"
+    "**Used** is the higher of the two, to stay on the cautious side."
+)
+
+# ---------------------------------------------------------------- how the downside is found
+st.subheader("How the downside is found")
+term = int(
+    st.number_input(
+        "Payment term to explain (calendar days)",
+        1,
+        365,
+        days,
+        step=1,
+        help="Starts at your payment date. Type any number of days, for example 7, 30 or 180, to see its calculation.",
+    )
+)
+rk = horizon_risk(d, term, range_start, range_end)
+h = rk["business_days"]
+moves = one_day_moves(d, range_start, range_end)
+periods = past_periods(d, term, range_start, range_end)
+basis = (
+    f"the daily changes between {range_start:%d %b %Y} and {range_end:%d %b %Y}"
+    if use_range
+    else f"the last {C.VAR_WINDOW} daily changes"
+)
+st.caption(
+    f"{term} calendar days (a payment on {last_date + dt.timedelta(days=term):%d %b %Y}) are about {h} business days "
+    "(rates exist only on working days: days x 5/7). "
+    "A fall in the rate is a negative change, and it is the loss for someone holding "
+    f"{last.base}. The cut is made at the worst 5%, so 'worse than the cut' means one of the worst 1-in-20."
+)
+step1, step3 = st.columns(2)
+
+with step1:
+    st.markdown("**Step 1: the 1-day downside**")
+    st.write(
+        f"Take {basis}{f' ({len(moves)} changes)' if use_range else ''} and sort them from worst to best. "
+        f"The 1-day downside is where the worst 5% ends: {cut_text(len(moves))} of {len(moves)}."
+    )
+    worst = moves.nsmallest(8, "move").reset_index(drop=True)
+    one_day = pd.DataFrame({"#": worst.index + 1, "Date": worst["date"], "Daily change": worst["move"]})
+    if pd.notna(rk["var1_pct"]):
+        one_day["Worse than the cut"] = ["yes" if m < -rk["var1_pct"] else "no" for m in worst["move"]]
+    st.dataframe(
+        one_day.style.format({"Date": "{:%d %b %Y}", "Daily change": "{:+.2%}"}),
+        hide_index=True,
+        width="stretch",
+    )
+    if pd.notna(rk["var1_pct"]):
+        st.markdown(
+            f"1-day downside = **{pct(rk['var1_pct'])}**, i.e. about "
+            f"**{value_quote * rk['var1_pct']:,.0f} {last.quote}** on {amount:,.0f} {last.base} for one day."
+        )
+    else:
+        st.warning(f"Not enough daily changes (at least {C.HORIZON_MIN_OBS} are needed).")
+    st.markdown("**Step 2: Downside (scaling)**")
+    st.markdown(f"{pct(rk['var1_pct'])} x √{h} = **{pct(rk['scaled_pct'])}**")
+    st.caption(
+        f"√{h} = {h**0.5:.2f}. Bad days do not all come in a row, so the loss grows slower than {h} x {pct(rk['var1_pct'])}."
+    )
+
+with step3:
+    st.markdown("**Step 3: Downside (past periods)**")
+    st.write(
+        f"Take every past stretch of {h} business days and measure how the rate changed from its first day to its "
+        f"last. There are {len(periods)} such stretches in {'your range' if use_range else 'the history'}. Sort them "
+        f"from worst to best: the cut falls {cut_text(len(periods))} (the worst 5%, about {0.05 * len(periods):.0f} stretches)."
+    )
+    if pd.notna(rk["hist_pct"]):
+        cut = rk["hist_pct"]
+        beyond = periods[periods["move"] < -cut]
+        other = periods[periods["move"] >= -cut]
+        fp = go.Figure()
+        for part, name, color, size in ((other, "Other stretches", "#8d99ae", 4), (beyond, "Worst 5%", "#d1495b", 6)):
+            fp.add_scatter(
+                x=part["end"],
+                y=part["move"],
+                mode="markers",
+                name=name,
+                marker=dict(color=color, size=size),
+                customdata=part["start"].dt.strftime("%d %b %Y"),
+                hovertemplate="from %{customdata} to %{x|%d %b %Y}<br>%{y:+.2%}<extra></extra>",
+            )
+        fp.add_hline(y=-cut, line=dict(color="#e9a23b", dash="dash"), annotation_text=f"cut {pct(cut)}")
+        fp.update_layout(
+            height=260,
+            margin=dict(t=10, b=10, l=10, r=10),
+            yaxis=dict(tickformat=".0%", title=f"change over {h} days"),
+            legend=dict(orientation="h"),
+        )
+        st.plotly_chart(fp, width="stretch")
+
+        ranked = periods.sort_values("move").reset_index(drop=True)
+        k = int(cut_rank(len(ranked)))  # the cut sits between the k-th and (k+1)-th worst
+        rows = ranked.iloc[sorted({0, 1, 2, k - 1, k})]
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "#": rows.index + 1,
+                    "From": rows["start"],
+                    "To": rows["end"],
+                    "Change": rows["move"],
+                    "Worse than the cut": ["yes" if m < -cut else "no" for m in rows["move"]],
+                }
+            ).style.format({"From": "{:%d %b %Y}", "To": "{:%d %b %Y}", "Change": "{:+.2%}"}),
+            hide_index=True,
+            width="stretch",
+        )
+        st.caption(
+            f"Rows 1-3 are the worst stretches; rows {k} and {k + 1} are the two either side of the cut, "
+            f"so {pct(cut)} lies between {pct(-rows['move'].iloc[-2])} and {pct(-rows['move'].iloc[-1])}."
+        )
+        episodes = bad_episodes(periods, cut, term)
+        st.caption(
+            f"The {len(beyond)} red stretches overlap (one starting a day later is almost the same fall), so they come "
+            f"from only {len(episodes)} separate episode(s): "
+            + "; ".join(f"{e.start:%b %Y} to {e.end:%b %Y} (worst {e.worst:+.1%})" for e in episodes.itertuples())
+            + "."
+        )
+        span = (periods["end"] - periods["start"]).dt.days
+        st.caption(
+            f"'{h} business days' means {h} rows of the data. The source skips some days, so a stretch covers "
+            f"{span.min()} to {span.max()} calendar days (typically {span.median():.0f})."
+        )
+        st.markdown(f"Downside (past periods) = **{pct(cut)}**")
+    else:
+        st.warning(f"Not enough past stretches (at least {C.HORIZON_MIN_WINDOWS} are needed).")
+
+if pd.notna(rk["loss_pct"]):
+    st.success(
+        f"**Step 4: used.** The higher of {pct(rk['scaled_pct'])} (scaling) and {pct(rk['hist_pct'])} (past periods) "
+        f"is **{pct(rk['loss_pct'])}**. {amount:,.0f} {last.base} x {last.rate:,.4f} x {pct(rk['loss_pct'])} = "
+        f"**{value_quote * rk['loss_pct']:,.0f} {last.quote}** in about 1 case out of 20."
+    )
 
 # ---------------------------------------------------------------- volatility + league table
 left, right = st.columns(2)
