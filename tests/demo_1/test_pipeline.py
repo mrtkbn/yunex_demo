@@ -204,6 +204,60 @@ def test_no_range_is_unchanged_by_the_new_parameters():
     assert horizon_risk(d, 30)["scaled_pct"] == pytest.approx(abs(d["var95_1d"].iloc[-1]) * np.sqrt(21))
 
 
+# ------------------------------------------------------------ the numbers behind the downsides
+def test_one_day_moves_reproduce_the_1_day_downside(star):
+    from horizon import horizon_risk, one_day_moves
+
+    d = _series(star, "ECB", "EUR/TRY")
+    m = one_day_moves(d)
+    assert len(m) == 90
+    assert -m["move"].quantile(0.05) == pytest.approx(horizon_risk(d, 30)["var1_pct"])
+
+
+def test_past_periods_reproduce_the_historical_downside(star):
+    from horizon import horizon_risk, past_periods
+
+    d = _series(star, "ECB", "EUR/TRY")
+    r = horizon_risk(d, 30)
+    p = past_periods(d, 30)
+    assert len(p) == r["n_windows"]
+    assert -p["move"].quantile(0.05) == pytest.approx(r["hist_pct"])
+    assert ((p["end"] - p["start"]).dt.days > 0).all()
+
+
+def test_tables_follow_the_date_range(star):
+    from horizon import horizon_risk, one_day_moves, past_periods
+
+    d = _series(star, "ECB", "EUR/TRY")
+    start, end = d.date.iloc[100], d.date.iloc[-1]
+    r = horizon_risk(d, 30, start, end)
+    assert -one_day_moves(d, start, end)["move"].quantile(0.05) == pytest.approx(r["var1_pct"])
+    assert -past_periods(d, 30, start, end)["move"].quantile(0.05) == pytest.approx(r["hist_pct"])
+
+
+def test_overlapping_bad_stretches_count_as_one_episode():
+    from horizon import bad_episodes
+
+    p = pd.DataFrame(
+        {
+            "start": pd.to_datetime(["2026-01-05", "2026-01-06", "2026-01-08", "2026-06-01", "2026-06-02"]),
+            "end": pd.to_datetime(["2026-02-05", "2026-02-06", "2026-02-08", "2026-07-01", "2026-07-02"]),
+            "move": [-0.04, -0.05, -0.03, -0.06, -0.02],
+        }
+    )
+    e = bad_episodes(p, loss_pct=0.025, calendar_days=30)  # everything below -2.5% is "worse than the cut"
+    assert list(e["stretches"]) == [3, 1]  # the -2% stretch is not beyond the cut
+    assert list(e["worst"]) == [-0.05, -0.06]
+    assert e["start"].iloc[0] == pd.Timestamp("2026-01-05") and e["end"].iloc[0] == pd.Timestamp("2026-02-08")
+
+
+def test_cut_rank_sits_between_neighbours():
+    from horizon import cut_rank
+
+    assert cut_rank(90) == pytest.approx(5.45)  # between the 5th and 6th worst of 90
+    assert cut_rank(61) == pytest.approx(4.0)  # exactly the 4th worst
+
+
 # ------------------------------------------------------------ totals over a period
 def _prices(values):
     return pd.DataFrame({"date": pd.bdate_range("2026-01-05", periods=len(values)), "rate": values})
